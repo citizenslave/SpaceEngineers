@@ -13,11 +13,12 @@ void ConfigurePanels(List<IMyTextSurface> panels, TextAlignment align = TextAlig
     foreach (IMyTextSurface panel in panels) {
         panel.Alignment = align;
         panel.FontSize = fontSize;
+        panel.FontColor = Color.DarkSlateGray;
         panel.ContentType = ContentType.TEXT_AND_IMAGE;
     }
 }
 
-void PrintPanels(List<IMyTextSurface> panels, string text, Boolean append = true) {
+static void PrintPanels(List<IMyTextSurface> panels, string text, Boolean append = true) {
     foreach (IMyTextSurface panel in panels) panel.WriteText(text, append);
 }
 
@@ -31,12 +32,16 @@ public void Save() {
 }
 
 public void Main(string argument, UpdateType updateSource) {
-    float oxygenCapacity = mainCockpit.OxygenCapacity;
-    float oxygenFilledRatio = mainCockpit.OxygenFilledRatio;
+    if ((updateSource & UpdateType.Update100) != 0) {
+        DisplayCockpitOxygen(mainCockpit, oxygenStatusPanels);
+    }
+}
+
+static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
+    float oxygenCapacity = cockpit.OxygenCapacity;
+    float oxygenFilledRatio = cockpit.OxygenFilledRatio;
     float oxygenFill = oxygenFilledRatio * oxygenCapacity;
     string oxygenStatus = $"{ oxygenFill.ToString("n2") } / { oxygenCapacity.ToString("n2") }L\n";
     oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n2") }%)";
-    PrintPanels(oxygenStatusPanels, "Oxygen Status:\n", false);
-    PrintPanels(oxygenStatusPanels, oxygenStatus);
+    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}", false);
 }
-
