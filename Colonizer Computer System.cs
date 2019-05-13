@@ -1,15 +1,29 @@
 IMyCockpit mainCockpit;
 List<IMyTextSurface> oxygenStatusPanels = new List<IMyTextSurface>();
+List<IMyTextSurface> powerStatusPanels = new List<IMyTextSurface>();
+
+List<IMyPowerProducer> powerProducers = new List<IMyPowerProducer>();
+
+Boolean includeConnected = false;
 
 public Program() {
+
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
+
     mainCockpit = GridTerminalSystem.GetBlockWithName("Cockpit") as IMyCockpit;
 
     oxygenStatusPanels.Add(mainCockpit.GetSurface(1));
+    powerStatusPanels.Add(mainCockpit.GetSurface(2));
+
     ConfigurePanels(oxygenStatusPanels);
+    ConfigurePanels(powerStatusPanels);
+
+    GridTerminalSystem.GetBlocksOfType<IMyPowerProducer>(powerProducers, producer => {
+        return includeConnected || producer.IsSameConstructAs(Me);
+    });
 }
 
-void ConfigurePanels(List<IMyTextSurface> panels, TextAlignment align = TextAlignment.CENTER, float fontSize = 2.0f) {
+static void ConfigurePanels(List<IMyTextSurface> panels, TextAlignment align = TextAlignment.CENTER, float fontSize = 1.8f) {
     foreach (IMyTextSurface panel in panels) {
         panel.Alignment = align;
         panel.FontSize = fontSize;
@@ -32,10 +46,13 @@ public void Save() {
 }
 
 public void Main(string argument, UpdateType updateSource) {
+
     if ((updateSource & UpdateType.Update100) != 0) {
         DisplayCockpitOxygen(mainCockpit, oxygenStatusPanels);
+        DisplayPowerSummary(powerProducers, powerStatusPanels);
     }
 }
+
 
 static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
     float oxygenCapacity = cockpit.OxygenCapacity;
@@ -43,5 +60,41 @@ static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displa
     float oxygenFill = oxygenFilledRatio * oxygenCapacity;
     string oxygenStatus = $"{ oxygenFill.ToString("n2") } / { oxygenCapacity.ToString("n2") }L\n";
     oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n2") }%)";
-    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}", false);
+    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}\nIce:", false);
+}
+
+static void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyTextSurface> panels) {
+    PrintPanels(panels, $"Power Summary:\n", false);
+
+    // Hydrogen Engine Section
+    float totalFuelAmount = 0f;
+    float totalFuelCapacity = 0f;
+    float totalMaxPower = 0f;
+    float totalCurrentPower = 0f;
+    int hydrogenEngineCount = 0;
+
+    foreach (IMyPowerProducer producer in powerProducers) {
+        if (producer.BlockDefinition.TypeId.ToString().IndexOf("HydrogenEngine") != -1) {
+            hydrogenEngineCount++;
+            string[] fuel = producer.DetailedInfo.Split('\n')[3].Split()[2].Split('/');
+            fuel[0] = fuel[0].Substring(1, fuel[0].Length - 2);
+            fuel[1] = fuel[1].Substring(0, fuel[1].Length - 2);
+
+            float fuelAmount = float.Parse(fuel[0]);
+            float fuelCapacity = float.Parse(fuel[1]);
+            float fuelRatio = fuelAmount/fuelCapacity;
+
+            totalFuelAmount += fuelAmount;
+            totalFuelCapacity += fuelCapacity;
+
+            totalMaxPower += producer.MaxOutput;
+            totalCurrentPower += producer.CurrentOutput;
+        }
+    }
+
+    PrintPanels(panels, $"{ totalCurrentPower.ToString("n1") } / { totalMaxPower.ToString("n1") } MW\n");
+    PrintPanels(panels, $"Aux:\n");
+    PrintPanels(panels, $"H2: ({ ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n1") }%)\n");
+    PrintPanels(panels, $"U:\n");
+    PrintPanels(panels, $"Ice:\n");
 }
