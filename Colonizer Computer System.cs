@@ -17,9 +17,16 @@ public Program() {
     ConfigurePanels(oxygenStatusPanels);
     ConfigurePanels(powerStatusPanels);
 
-    GridTerminalSystem.GetBlocksOfType<IMyPowerProducer>(powerProducers, producer => {
-        return includeConnected || producer.IsSameConstructAs(Me);
-    });
+    RefreshBlocks<IMyPowerProducer>(powerProducers);
+}
+
+Boolean Connected(IMyTerminalBlock block) {
+    return includeConnected || block.IsSameConstructAs(Me);
+}
+
+void RefreshBlocks<T>(List<T> list) where T : class, IMyTerminalBlock {
+    list.Clear();
+    GridTerminalSystem.GetBlocksOfType<T>(list, Connected);
 }
 
 static void ConfigurePanels(List<IMyTextSurface> panels, TextAlignment align = TextAlignment.CENTER, float fontSize = 1.8f) {
@@ -49,15 +56,21 @@ public void Main(string argument, UpdateType updateSource) {
         DisplayCockpitOxygen(mainCockpit, oxygenStatusPanels);
         DisplayPowerSummary(powerProducers, powerStatusPanels);
     }
+    updateSource &= ~UpdateType.Update100;
+    if (updateSource != UpdateType.None) {
+        Echo("Process Arguments...");
+    }
 }
+
 
 static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
     float oxygenCapacity = cockpit.OxygenCapacity;
     float oxygenFilledRatio = cockpit.OxygenFilledRatio;
     float oxygenFill = oxygenFilledRatio * oxygenCapacity;
     string oxygenStatus = $"{ oxygenFill.ToString("n2") } / { oxygenCapacity.ToString("n2") }L\n";
-    oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n2") }%)";
-    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}\nIce:", false);
+    oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n0") }%)";
+    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}\n\n", false);
+    PrintPanels(displayPanels, $"O2 Ice: { 0 } kg\n");
 }
 
 static void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyTextSurface> panels) {
@@ -74,28 +87,32 @@ static void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyT
     int hydrogenEngineCount = 0;
 
     foreach (IMyPowerProducer producer in powerProducers) {
+        Boolean functional = true;
         if (producer.BlockDefinition.TypeId.ToString().IndexOf("HydrogenEngine") != -1) {
             hydrogenEngineCount++;
 
             float[] fuelStats = ReadHydrogenEngineFuel(producer);
-
             totalFuelAmount += fuelStats[0];
             totalFuelCapacity += fuelStats[1];
+            if (fuelStats[0] == 0) functional = false;
+        } else if (producer.BlockDefinition.TypeId.ToString().IndexOf("BatteryBlock") != -1) {
+            IMyBatteryBlock battery = (IMyBatteryBlock) producer;
+            if (battery.ChargeMode == ChargeMode.Recharge) auxMaxPower += ReadChargingBatteryMaxOutput(battery);
+        }
 
-            if (producer.Enabled) {
-                activeMaxPower += producer.MaxOutput;
-                totalCurrentPower += producer.CurrentOutput;
-            } else {
-                auxMaxPower += producer.MaxOutput;
-            }
+        if (producer.Enabled && functional) {
+            activeMaxPower += producer.MaxOutput;
+            totalCurrentPower += producer.CurrentOutput;
+        } else if (functional) {
+            auxMaxPower += producer.MaxOutput;
         }
     }
 
     PrintPanels(panels, $"{ totalCurrentPower.ToString("n1") } / { activeMaxPower.ToString("n1") } MW\n");
     PrintPanels(panels, $"Aux: { auxMaxPower.ToString("n1") } MW\n");
-    PrintPanels(panels, $"H2: ({ ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n1") }%)\n");
-    PrintPanels(panels, $"U:\n");
-    PrintPanels(panels, $"Ice:\n");
+    PrintPanels(panels, $"Batt/H2: { 100 }% / { ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n0") }%\n");
+    PrintPanels(panels, $"H2 Ice: { 0 } kg\n");
+    PrintPanels(panels, $"U: { 0 } kg\n");
 }
 
 static float[] ReadHydrogenEngineFuel(IMyPowerProducer hydrogenEngine) {
@@ -108,4 +125,9 @@ static float[] ReadHydrogenEngineFuel(IMyPowerProducer hydrogenEngine) {
     float[] result = {fuelAmount, fuelCapacity};
 
     return result;
+}
+
+static float ReadChargingBatteryMaxOutput(IMyBatteryBlock battery) {
+    string[] maxOutput = battery.DetailedInfo.Split('\n')[1].Split(':')[1].Substring(1).Split();
+    return float.Parse(maxOutput[0]) * (maxOutput[1].Equals("MW")?1:0.001f);
 }
