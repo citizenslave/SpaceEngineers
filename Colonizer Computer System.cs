@@ -62,7 +62,6 @@ public void Main(string argument, UpdateType updateSource) {
     }
 }
 
-
 static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
     float oxygenCapacity = cockpit.OxygenCapacity;
     float oxygenFilledRatio = cockpit.OxygenFilledRatio;
