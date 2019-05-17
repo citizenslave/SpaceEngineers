@@ -4,6 +4,9 @@ List<IMyTextSurface> powerStatusPanels = new List<IMyTextSurface>();
 
 List<IMyPowerProducer> powerProducers = new List<IMyPowerProducer>();
 
+MyItemType URANIUM_I = new MyItemType("MyObjectBuilder_Ingot", "Uranium");
+MyItemType ICE = new MyItemType("MyObjectBuilder_Ore", "Ice");
+
 Boolean includeConnected = false;
 
 public Program() {
@@ -49,6 +52,7 @@ public void Save() {
     // 
     // This method is optional and can be removed if not
     // needed.
+
 }
 
 public void Main(string argument, UpdateType updateSource) {
@@ -62,41 +66,80 @@ public void Main(string argument, UpdateType updateSource) {
     }
 }
 
-static void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
+void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels) {
     float oxygenCapacity = cockpit.OxygenCapacity;
     float oxygenFilledRatio = cockpit.OxygenFilledRatio;
     float oxygenFill = oxygenFilledRatio * oxygenCapacity;
     string oxygenStatus = $"{ oxygenFill.ToString("n2") } / { oxygenCapacity.ToString("n2") }L\n";
     oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n0") }%)";
-    PrintPanels(displayPanels, $"Oxygen Status:\n{oxygenStatus}\n\n", false);
-    PrintPanels(displayPanels, $"O2 Ice: { 0 } kg\n");
+
+    List<IMyGasGenerator> gasGenerators = new List<IMyGasGenerator>();
+    GridTerminalSystem.GetBlocksOfType<IMyGasGenerator>(gasGenerators, block => {
+        if (!Connected(block)) return false;
+        if (!block.GetInventory(0).IsConnectedTo(cockpit.GetInventory(0))) return false;
+        return true;
+    });
+    float connectedIce = SearchConnectedItems(gasGenerators, ICE);
+
+    float oxygenTankCapacity = 0f;
+    float oxygenTankAmount = 0f;
+    List<IMyGasTank> gasTanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType<IMyGasTank>(gasTanks, block => {
+        IMyGasTank tank = (IMyGasTank) block;
+        if (!Connected(tank)) return false;
+        if (tank.BlockDefinition.SubtypeId.ToString().IndexOf("OxygenTank") == -1) return false;
+        foreach (IMyGasGenerator generator in gasGenerators) {
+            if (!tank.GetInventory(0).IsConnectedTo(generator.GetInventory(0))) return false;
+        }
+        oxygenTankCapacity += tank.Capacity;
+        oxygenTankAmount += tank.Capacity * (float) tank.FilledRatio;
+        return true;
+    });
+
+    oxygenStatus = $"Oxygen Status:\n{ oxygenStatus }\n\nO2 Tanks: ";
+    oxygenStatus += gasTanks.Count == 0?"None\n":$"{ ((oxygenTankAmount / oxygenTankCapacity) * 100).ToString("n0") }\n";
+
+    PrintPanels(displayPanels, oxygenStatus, false);
+    PrintPanels(displayPanels, $"O2 Ice: { (connectedIce / 1000).ToString("n2") } Mg\n");
 }
 
-static void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyTextSurface> panels) {
+void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyTextSurface> panels) {
     PrintPanels(panels, $"Power Summary:\n", false);
 
     float totalFuelAmount = 0f;
     float totalFuelCapacity = 0f;
+
+    float totalChargeAmount = 0f;
+    float totalChargeCapacity = 0f;
+
+    float totalUraniumMass = 0f;
+    float totalIceMass = 0f;
 
     float activeMaxPower = 0f;
     float auxMaxPower = 0f;
 
     float totalCurrentPower = 0f;
 
-    int hydrogenEngineCount = 0;
+    List<IMyPowerProducer> hydrogenEngines = new List<IMyPowerProducer>();
+    List<IMyPowerProducer> reactors = new List<IMyPowerProducer>();
 
     foreach (IMyPowerProducer producer in powerProducers) {
         Boolean functional = true;
-        if (producer.BlockDefinition.TypeId.ToString().IndexOf("HydrogenEngine") != -1) {
-            hydrogenEngineCount++;
-
+        string blockType = producer.BlockDefinition.TypeId.ToString();
+        if (blockType.IndexOf("HydrogenEngine") != -1) {
             float[] fuelStats = ReadHydrogenEngineFuel(producer);
             totalFuelAmount += fuelStats[0];
             totalFuelCapacity += fuelStats[1];
             if (fuelStats[0] == 0) functional = false;
-        } else if (producer.BlockDefinition.TypeId.ToString().IndexOf("BatteryBlock") != -1) {
+            hydrogenEngines.Add(producer);
+        } else if (blockType.IndexOf("BatteryBlock") != -1) {
             IMyBatteryBlock battery = (IMyBatteryBlock) producer;
             if (battery.ChargeMode == ChargeMode.Recharge) auxMaxPower += ReadChargingBatteryMaxOutput(battery);
+            totalChargeAmount += battery.CurrentStoredPower;
+            totalChargeCapacity += battery.MaxStoredPower;
+        } else if (blockType.IndexOf("Reactor") != 1) {
+            if (producer.GetInventory(0).CurrentMass == 0) functional = false;
+            reactors.Add(producer);
         }
 
         if (producer.Enabled && functional) {
@@ -107,11 +150,62 @@ static void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyT
         }
     }
 
-    PrintPanels(panels, $"{ totalCurrentPower.ToString("n1") } / { activeMaxPower.ToString("n1") } MW\n");
+    totalUraniumMass += SearchConnectedItems(reactors, URANIUM_I);
+
+    List<IMyGasGenerator> gasGenerators = new List<IMyGasGenerator>();
+    GridTerminalSystem.GetBlocksOfType<IMyGasGenerator>(gasGenerators, block => {
+        if (!Connected(block)) return false;
+        // if not connected to engines return false
+        return true;
+    });
+    totalIceMass += SearchConnectedItems(gasGenerators, ICE);
+
+    List<IMyGasTank> gasTanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType<IMyGasTank>(gasTanks, block => {
+        IMyGasTank tank = (IMyGasTank) block;
+        if (!Connected(tank)) return false;
+        if (tank.BlockDefinition.SubtypeId.ToString().IndexOf("HydrogenTank") == -1) return false;
+        foreach (IMyGasGenerator generator in gasGenerators) {
+            if (!tank.GetInventory(0).IsConnectedTo(generator.GetInventory(0))) return false;
+        }
+        totalFuelCapacity += tank.Capacity;
+        totalFuelAmount += tank.Capacity * (float) tank.FilledRatio;
+        return true;
+    });
+
+    PrintPanels(panels, $"{ totalCurrentPower.ToString("n2") } / { activeMaxPower.ToString("n1") } MW\n");
     PrintPanels(panels, $"Aux: { auxMaxPower.ToString("n1") } MW\n");
-    PrintPanels(panels, $"Batt/H2: { 100 }% / { ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n0") }%\n");
-    PrintPanels(panels, $"H2 Ice: { 0 } kg\n");
-    PrintPanels(panels, $"U: { 0 } kg\n");
+    PrintPanels(panels, $"Batt/H2: { ((totalChargeAmount / totalChargeCapacity) * 100).ToString("n0") }% /");
+    PrintPanels(panels, $" { ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n0") }%\n");
+    PrintPanels(panels, $"H2 Ice: { (totalIceMass / 1000).ToString("n2") } Mg\n");
+    PrintPanels(panels, $"U: { totalUraniumMass.ToString("n2") } kg\n");
+}
+
+float SearchConnectedItems<T>(List<T> destinationBlocks, MyItemType item,
+        Boolean requireAll = false) where T: class, IMyTerminalBlock {
+    float foundItems = 0f;
+    List<IMyTerminalBlock> connectedBlocks = new List<IMyTerminalBlock>();
+    GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(connectedBlocks, block => {
+        if (!Connected(block)) return false;
+        if (block.GetInventory(0) == null) return false;
+        
+        Boolean connectedToAny = false;
+        foreach (T dBlock in destinationBlocks) {
+            if (!block.GetInventory(0).IsConnectedTo(dBlock.GetInventory(0))) {
+                if (requireAll) return false;
+            } else {
+                connectedToAny = true;
+            }
+        }
+
+        if (!connectedToAny) return false;
+
+        for (int i=0; i < block.InventoryCount; i++) foundItems += (float) block.GetInventory(i).GetItemAmount(item);
+
+        return true;
+    });
+
+    return foundItems;
 }
 
 static float[] ReadHydrogenEngineFuel(IMyPowerProducer hydrogenEngine) {
