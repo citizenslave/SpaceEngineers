@@ -1,11 +1,12 @@
 IMyCockpit mainCockpit;
 List<IMyTextSurface> oxygenStatusPanels = new List<IMyTextSurface>();
 List<IMyTextSurface> powerStatusPanels = new List<IMyTextSurface>();
+List<IMyTextSurface> cargoStatusPanels = new List<IMyTextSurface>();
 
 List<IMyPowerProducer> powerProducers = new List<IMyPowerProducer>();
 
-MyItemType URANIUM_I = new MyItemType("MyObjectBuilder_Ingot", "Uranium");
-MyItemType ICE = new MyItemType("MyObjectBuilder_Ore", "Ice");
+static MyItemType URANIUM_I = new MyItemType("MyObjectBuilder_Ingot", "Uranium");
+static MyItemType ICE = new MyItemType("MyObjectBuilder_Ore", "Ice");
 
 Boolean includeConnected = false;
 
@@ -16,9 +17,11 @@ public Program() {
 
     oxygenStatusPanels.Add(mainCockpit.GetSurface(1));
     powerStatusPanels.Add(mainCockpit.GetSurface(2));
+    cargoStatusPanels.Add(mainCockpit.GetSurface(3));
 
     ConfigurePanels(oxygenStatusPanels);
     ConfigurePanels(powerStatusPanels);
+    ConfigurePanels(cargoStatusPanels);
 
     RefreshBlocks<IMyPowerProducer>(powerProducers);
 }
@@ -45,6 +48,10 @@ static void PrintPanels(List<IMyTextSurface> panels, string text, Boolean append
     foreach (IMyTextSurface panel in panels) panel.WriteText(text, append);
 }
 
+static string Percent(float total, float capacity) {
+    return $"{ ((total / capacity) * 100).ToString("n0") }%";
+}
+
 public void Save() {
     // Called when the program needs to save its state. Use
     // this method to save your state to the Storage field
@@ -59,6 +66,7 @@ public void Main(string argument, UpdateType updateSource) {
     if ((updateSource & UpdateType.Update100) != 0) {
         DisplayCockpitOxygen(mainCockpit, oxygenStatusPanels);
         DisplayPowerSummary(powerProducers, powerStatusPanels);
+        DisplayCargoSummary(cargoStatusPanels);
     }
     updateSource &= ~UpdateType.Update100;
     if (updateSource != UpdateType.None) {
@@ -71,7 +79,7 @@ void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels
     float oxygenFilledRatio = cockpit.OxygenFilledRatio;
     float oxygenFill = oxygenFilledRatio * oxygenCapacity;
     string oxygenStatus = $"{ oxygenFill.ToString("n2") } / { oxygenCapacity.ToString("n2") }L\n";
-    oxygenStatus += $"({ (oxygenFilledRatio*100f).ToString("n0") }%)";
+    oxygenStatus += $"({ Percent(oxygenFill, oxygenCapacity) })";
 
     List<IMyGasGenerator> gasGenerators = new List<IMyGasGenerator>();
     GridTerminalSystem.GetBlocksOfType<IMyGasGenerator>(gasGenerators, block => {
@@ -97,7 +105,7 @@ void DisplayCockpitOxygen(IMyCockpit cockpit, List<IMyTextSurface> displayPanels
     });
 
     oxygenStatus = $"Oxygen Status:\n{ oxygenStatus }\n\nO2 Tanks: ";
-    oxygenStatus += gasTanks.Count == 0?"None\n":$"{ ((oxygenTankAmount / oxygenTankCapacity) * 100).ToString("n0") }\n";
+    oxygenStatus += gasTanks.Count == 0?"None\n":$"{ Percent(oxygenTankAmount, oxygenTankCapacity) }\n";
 
     PrintPanels(displayPanels, oxygenStatus, false);
     PrintPanels(displayPanels, $"O2 Ice: { (connectedIce / 1000).ToString("n2") } Mg\n");
@@ -175,8 +183,8 @@ void DisplayPowerSummary(List<IMyPowerProducer> powerProducers, List<IMyTextSurf
 
     PrintPanels(panels, $"{ totalCurrentPower.ToString("n2") } / { activeMaxPower.ToString("n1") } MW\n");
     PrintPanels(panels, $"Aux: { auxMaxPower.ToString("n1") } MW\n");
-    PrintPanels(panels, $"Batt/H2: { ((totalChargeAmount / totalChargeCapacity) * 100).ToString("n0") }% /");
-    PrintPanels(panels, $" { ((totalFuelAmount / totalFuelCapacity) * 100).ToString("n0") }%\n");
+    PrintPanels(panels, $"Batt/H2: { Percent(totalChargeAmount, totalChargeCapacity) } /");
+    PrintPanels(panels, $" { Percent(totalFuelAmount, totalFuelCapacity) }\n");
     PrintPanels(panels, $"H2 Ice: { (totalIceMass / 1000).ToString("n2") } Mg\n");
     PrintPanels(panels, $"U: { totalUraniumMass.ToString("n2") } kg\n");
 }
@@ -223,4 +231,84 @@ static float[] ReadHydrogenEngineFuel(IMyPowerProducer hydrogenEngine) {
 static float ReadChargingBatteryMaxOutput(IMyBatteryBlock battery) {
     string[] maxOutput = battery.DetailedInfo.Split('\n')[1].Split(':')[1].Substring(1).Split();
     return float.Parse(maxOutput[0]) * (maxOutput[1].Equals("MW")?1:0.001f);
+}
+
+void DisplayCargoSummary(List<IMyTextSurface> panels) {
+    PrintPanels(panels, "Cargo Summary:\n", false);
+
+    float iceStorage = 0f;
+    float iceCapacity = 0f;
+    float stoneStorage = 0f;
+    float stoneCapacity = 0f;
+    float oreStorage = 0f;
+    float oreCapacity = 0f;
+    float ingotStorage = 0f;
+    float ingotCapacity = 0f;
+    float ammoStorage = 0f;
+    float ammoCapacity = 0f;
+    float miscStorage = 0f;
+    float miscCapacity = 0f;
+
+    List<IMyTerminalBlock> storageBlocks = new List<IMyTerminalBlock>();
+    GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(storageBlocks, block => {
+        if (!Connected(block) || !block.HasInventory) return false;
+        string blockType = block.BlockDefinition.ToString();
+        if (blockType.IndexOf("Tank") != -1) return false;
+        if (blockType.IndexOf("Reactor") != -1) return false;
+
+        IMyInventory blockInventory = block.GetInventory(0);
+        float current = (float) blockInventory.CurrentVolume;
+        float max = (float) blockInventory.MaxVolume;
+
+        if (blockType.IndexOf("CargoContainer") != -1 ||
+                blockType.IndexOf("Connector") != -1 ||
+                blockType.IndexOf("Cockpit") != -1) {
+            iceStorage += current;
+            stoneStorage += current;
+            oreStorage += current;
+            ingotStorage += current;
+            ammoStorage += current;
+            miscStorage += current;
+
+            iceCapacity += max;
+            stoneCapacity += max;
+            oreCapacity += max;
+            ingotCapacity += max;
+            ammoCapacity += max;
+            miscCapacity += max;
+        } else if (blockType.IndexOf("OxygenGenerator") != -1) {
+            iceStorage += current;
+            iceCapacity += max;
+        } else if (blockType.IndexOf("Gun") != -1 ||
+                blockType.IndexOf("Turret") != -1) {
+            ammoStorage += current;
+            ammoCapacity += max;
+        } else if (blockType.IndexOf("Drill") != -1) {
+            iceStorage += current;
+            stoneStorage += current;
+            oreStorage += current;
+
+            iceCapacity += max;
+            stoneCapacity += max;
+            oreCapacity += max;
+        } else if (blockType.IndexOf("SurvivalKit") != -1) {
+            stoneStorage += current;
+            ingotStorage += current;
+            ingotStorage += (float) block.GetInventory(1).CurrentVolume;
+            miscStorage += (float) block.GetInventory(1).CurrentVolume;
+
+            stoneCapacity += max;
+            ingotCapacity += max;
+            ingotCapacity += (float) block.GetInventory(1).MaxVolume;
+            miscCapacity += (float) block.GetInventory(1).MaxVolume;
+        } else {
+            Echo($"Unhandled Storage Block:\n{ blockType }");
+        }
+        return true;
+    });
+
+    PrintPanels(panels, $"Ice/Stone: { Percent(iceStorage, iceCapacity) } / { Percent(stoneStorage, stoneCapacity) }\n");
+    PrintPanels(panels, $"Ore/Ingots: { Percent(oreStorage, oreCapacity) } / { Percent(ingotStorage, ingotCapacity) }\n");
+    PrintPanels(panels, $"Ammo: { Percent(ammoStorage, ammoCapacity) }\n");
+    PrintPanels(panels, $"Misc: { Percent(miscStorage, miscCapacity) }\n");
 }
