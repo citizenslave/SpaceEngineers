@@ -6,6 +6,7 @@ IMyExtendedPistonBase elevationPiston;
 IMyMotorStator drillRotor;
 
 Boolean drillExtending = false;
+Boolean drillsReset = false;
 
 public Program() {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
@@ -48,7 +49,7 @@ public void Save() {
 
 public void Main(string argument, UpdateType updateSource) {
     if (CargoCheck(0.95f)) PauseDrilling();
-    else UpdateDrills();
+    else if (!drillsReset) UpdateDrills();
 }
 
 void PauseDrilling() {
@@ -59,21 +60,36 @@ void PauseDrilling() {
 void UpdateDrills() {
     ToggleBlocks(drills, true);
     ToggleBlocks(radialPistons, true);
+    Boolean display = true;
     foreach (IMyExtendedPistonBase piston in radialPistons) {
         if (piston.CurrentPosition == piston.MaxLimit) {
-            Echo("Retracting");
+            if (display) Echo($"Retracting: {piston.CurrentPosition.ToString("n1")}m");
             piston.Velocity = -0.5f;
             drillExtending = false;
         } else if (drillExtending && elevationPiston.CurrentPosition == elevationPiston.MaxLimit) {
-            Echo($"Drilling: {piston.CurrentPosition.ToString("n1")}m");
+            if (display) Echo($"Drilling: {piston.CurrentPosition.ToString("n1")}m");
             piston.Velocity = 0.02f;
         } else if (piston.CurrentPosition == piston.MinLimit && !drillExtending) {
-            Echo("Advancing");
+            if (display) Echo($"Advancing: {piston.CurrentPosition.ToString("n1")}m");
+            if (elevationPiston.MaxLimit == elevationPiston.HighestPosition) {
+                ResetDrills();
+                return;
+            }
             elevationPiston.MaxLimit += 1f;
             drillExtending = true;
-        } else if (!drillExtending) Echo("Retracting");
-        else Echo("Advancing");
+        } else if (!drillExtending) {
+            if (display) Echo($"Retracting: {piston.CurrentPosition.ToString("n1")}m");
+        } else {
+            if (display) Echo($"Advancing: {piston.CurrentPosition.ToString("n1")}m");
+        }
+        display = false;
     }
+    Echo($"Vertical: {elevationPiston.CurrentPosition.ToString("n1")}m");
+}
+
+void ResetDrills() {
+    drillsReset = true;
+    PauseDrilling();
 }
 
 Boolean CargoCheck(float maxFillRatio) {
@@ -87,7 +103,7 @@ Boolean CargoCheck(float maxFillRatio) {
     }
 
     float fillRatio = currentVolume / maxVolume;
-    Echo($"{currentVolume} / {maxVolume} {(fillRatio*100).ToString("n2")}%");
+    Echo($"{(currentVolume*1000).ToString("n2")} / {(maxVolume*1000).ToString("n2")} L {(fillRatio*100).ToString("n2")}%");
     return fillRatio >= maxFillRatio;
 }
 
