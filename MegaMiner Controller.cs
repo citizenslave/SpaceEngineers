@@ -5,7 +5,8 @@ IMyExtendedPistonBase drillPiston;
 string drillState;
 string[] DRILL_COMMANDS = { "STOP", "START", "PAUSE" };
 
-public Program() {
+public Program()
+ {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
 
     drillRotor = GridTerminalSystem.GetBlockWithName("MM Drill Rotor") as IMyMotorStator;
@@ -71,10 +72,12 @@ void UpdateDrillState(string command) {
 
 void CheckDrill() {
     if (drillState.Equals("STOPPING")) StopDrills();
-    else if (drillState.Equals("PAUSED") || drillState.Equals("STOPPED")) return;
+    else if (drillState.Equals("STOPPED")) return;
+    else if (drillState.Equals("PAUSED") && !IsCargoFull(0.1f)) UpdateDrillState("PAUSE");
     else if (drillState.Equals("DRILLING")) {
         if (IsCargoFull(0.9f)) UpdateDrillState("PAUSE");
         if (drillPiston.CurrentPosition == drillPiston.MaxLimit) UpdateDrillState("STOP");
+        Echo($"{ drillPiston.CurrentPosition } / { drillPiston.MaxLimit }m");
     }
 }
 
@@ -108,14 +111,16 @@ Boolean IsCargoFull(float maxPercentFull) {
 
 void StopDrills() {
     Boolean stopped = true;
-    if (drillRotor.Angle < MathHelper.ToRadians(0.2f) || drillRotor.Angle >= MathHelper.ToRadians(359.8f)) {
+    if (drillRotor.Angle < MathHelper.ToRadians(0.5f) || drillRotor.Angle >= MathHelper.ToRadians(359.5f)) {
         drillRotor.TargetVelocityRPM = 0f;
         drillRotor.RotorLock = true;
         drillRotor.Enabled = false;
+        Echo($"{ MathHelper.ToDegrees(drillRotor.Angle) }");
     } else {
         stopped = false;
         drillRotor.TargetVelocityRPM = (drillRotor.Angle > MathHelper.ToRadians(270f)) ?
-                (24f*(float) (1 - (drillRotor.Angle / (2f*Math.PI)))) : 6f;
+                (12f*(float) (1 - (drillRotor.Angle / (2f*Math.PI)))) : 6f;
+        Echo($"{ MathHelper.ToDegrees(drillRotor.Angle) }");
     }
     if (drillPiston.CurrentPosition == 0f) {
         drillPiston.Velocity = 0f;
