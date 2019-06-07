@@ -1,9 +1,23 @@
 List<IMyTextSurface> cargoDisplays = new List<IMyTextSurface>();
 
+List<IMyTextSurface> rsnDisplays = new List<IMyTextSurface>();
+IMyRadioAntenna antenna;
+string RSN_CHANNEL = "RSN";
+
+Dictionary<long,string> rsnStatusData = new Dictionary<long,string>();
+Dictionary<long,int> rsnAgeData = new Dictionary<long,int>();
+
 public Program() {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
+
     cargoDisplays.Add(Me.GetSurface(0));
     cargoDisplays[0].ContentType = ContentType.TEXT_AND_IMAGE;
+    
+    List<IMyRadioAntenna> tAntenna = new List<IMyRadioAntenna>();
+    GridTerminalSystem.GetBlocksOfType(tAntenna, IsConnected);
+    antenna = tAntenna[0];
+    antenna.AttachedProgrammableBlock = Me.EntityId;
+    IGC.RegisterBroadcastListener(RSN_CHANNEL).SetMessageCallback(RSN_CHANNEL);
 }
 
 Boolean IsConnected(IMyTerminalBlock block) {
@@ -17,11 +31,49 @@ public void Save() {
 public void Main(string argument, UpdateType updateSource) {
     if ((updateSource & UpdateType.Update100) != 0) {
         updateSource &= ~UpdateType.Update100;
+
         SortInventory();
         DisplayInventory();
+
+        FindRSNDisplays();
+        UpdateRSNDisplays();
     }
     if (updateSource != UpdateType.None) {
-        // execute commands
+        if (argument.Equals(RSN_CHANNEL)) FetchPacket(RSN_CHANNEL);
+    }
+}
+
+void FetchPacket(string channel) {
+    IMyBroadcastListener listener = IGC.RegisterBroadcastListener(channel);
+    if (!listener.HasPendingMessage) return;
+    MyIGCMessage packet = listener.AcceptMessage();
+    if (channel.Equals(RSN_CHANNEL)) {
+        rsnStatusData[packet.Source] = (string) packet.Data;
+        rsnAgeData[packet.Source] = 0;
+    }
+}
+
+void FindRSNDisplays() {
+    List<IMyTextPanel> tPanels = new List<IMyTextPanel>();
+    GridTerminalSystem.GetBlocksOfType(tPanels, block => {
+        if (!IsConnected(block)) return false;
+        if (block.CustomData.IndexOf("DisplayType=RSN") == -1) return false;
+        IMyTextSurface surface = block;
+        if (!rsnDisplays.Contains(surface)) {
+            surface.ContentType = ContentType.TEXT_AND_IMAGE;
+            surface.WriteText("", false);
+            rsnDisplays.Add(surface);
+        }
+        return true;
+    });
+}
+
+void UpdateRSNDisplays() {
+    Display(rsnDisplays, "", false);
+    foreach (KeyValuePair<long,string> item in rsnStatusData) {
+        string age = (rsnAgeData[item.Key] < 2)?"":$"({ rsnAgeData[item.Key] }) ";
+        Display(rsnDisplays, $"{ age }{ item.Value }\n\n");
+        rsnAgeData[item.Key]++;
     }
 }
 
