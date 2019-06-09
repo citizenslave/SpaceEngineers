@@ -103,9 +103,42 @@ void ProcessRefineryCommands(string command) {
             } else if (refineryCommand.Argument(1).ToUpper().Equals("PRIORITY+") ||
                     refineryCommand.Argument(1).ToUpper().Equals("PRIORITY-")) {
                 AdjustRefineryPriority(refinery, refineryCommand);
+            } else if (refineryCommand.Argument(1).ToUpper().Equals("SCAN")) {
+                Dictionary<MyItemType,MyFixedPoint>.KeyCollection ores = ScanCargo(true, "Ore").Keys;
+                foreach (MyItemType type in ores)
+                    if (!type.SubtypeId.Equals("Ice") && !RefineryPriorities[refinery].Keys.Contains(type.SubtypeId)) {
+                        RefineryPriorities[refinery][type.SubtypeId] = RefineryPriorities[refinery].Count+1;
+                        Echo($"{ type.SubtypeId.ToString() } added to refinery:\n{ refinery.CustomName }");
+                        SaveRefineryConfig(refinery);
+                    }
+            } else if (refineryCommand.Argument(1).ToUpper().Equals("DELETE")) {
+                DeleteRefineryPriority(refinery, refineryCommand);
             } else Echo($"Unknown Refinery Command:\n\"{ refineryCommand.Argument(1) }\"");
         } else Echo($"Cannot find prioritized refinery \"{ refineryCommand.Argument(2) }\"");
     }
+}
+
+void DeleteRefineryPriority(IMyRefinery refinery, MyCommandLine refineryCommand) {
+    string ore = refineryCommand.Argument(3);
+    string menuName = $"{ refinery.CustomName } - Priority Menu";
+    if (ore.ToUpper().Equals("MENU")) {
+        ore = GetOreAtPriority(refinery, MenuIndicies[menuName]+1);
+    }
+    MenuSizes[menuName]--;
+    if (MenuIndicies[menuName] >= MenuSizes[menuName]) MenuIndicies[menuName] = MenuSizes[menuName]-1;
+    if (MenuIndicies[menuName] < 0) MenuIndicies[menuName] = 0;
+    if (!RefineryPriorities[refinery].Keys.Contains(ore)) {
+        Echo($"{ ore } is not prioritized for:\n{ refinery.CustomName }"); return;
+    }
+    int currentOrePriority = RefineryPriorities[refinery][ore];
+    List<string> lowerPriorityOres = new List<string>();
+    foreach (KeyValuePair<string,int> orePriority in RefineryPriorities[refinery]) {
+        if (orePriority.Value > currentOrePriority) lowerPriorityOres.Add(orePriority.Key);
+    }
+    foreach (string lowerPriorityOre in lowerPriorityOres) RefineryPriorities[refinery][lowerPriorityOre]--;
+    RefineryPriorities[refinery].Remove(ore);
+    SaveRefineryConfig(refinery);
+    Echo($"Deleted { ore } from:\n{ refinery.CustomName }");
 }
 
 void AdjustRefineryPriority(IMyRefinery refinery, MyCommandLine refineryCommand) {
@@ -134,6 +167,10 @@ void AdjustRefineryPriority(IMyRefinery refinery, MyCommandLine refineryCommand)
         RefineryPriorities[refinery][ore] = newOrePriority;
         Echo($"{ ore } priority { (isIncrease?"increased":"decreased") }");
     }
+    SaveRefineryConfig(refinery);
+}
+
+void SaveRefineryConfig(IMyRefinery refinery) {
     MyIni refineryConfig = new MyIni();
     foreach (KeyValuePair<string,int> orePriority in RefineryPriorities[refinery])
         refineryConfig.Set("Priority", orePriority.Key, orePriority.Value);
@@ -159,7 +196,7 @@ void PrioritizeRefining() {
         MyIni refineryConfig = new MyIni();
         MyIniParseResult result = new MyIniParseResult();
         if (refineryConfig.TryParse(block.CustomData, out result)) {
-            if (refineryConfig.ContainsSection("Priority")) {
+            if (true || refineryConfig.ContainsSection("Priority")) {
                 RefineryPriorities[refinery] = new Dictionary<string,int>();
                 RefineryDisplays[refinery] = new List<IMyTextSurface>();
                 GridTerminalSystem.GetBlocksOfType(RefineryDisplays[refinery], surface => {
@@ -184,6 +221,7 @@ void PrioritizeRefining() {
                     Display(RefineryDisplays[refinery], $"{ displayItem }\n");
                     priorityIndex++;
                 }
+                if (MenuSizes[menuName] == 0) Display(RefineryDisplays[refinery], "---SCAN FOR ORE---");
             }
         }
         return true;
@@ -323,6 +361,15 @@ int GetPriority(string customData, MyItemType type) {
 }
 
 void DisplayInventory(Boolean connected = false) {
+    Dictionary<MyItemType, MyFixedPoint> cargo = ScanCargo(connected);
+
+    Display(cargoDisplays, "", false);
+    foreach (KeyValuePair<MyItemType, MyFixedPoint> entry in cargo.OrderBy(i => FormatItemType(i.Key))) {
+        Display(cargoDisplays, $"{ FormatItemType(entry.Key) }: { FormatItemAmount(entry.Value) }\n");
+    }
+}
+
+Dictionary<MyItemType,MyFixedPoint> ScanCargo(Boolean connected = false, string type = "", string subtype = "") {
     Dictionary<MyItemType, MyFixedPoint> cargo = new Dictionary<MyItemType, MyFixedPoint>();
     List<IMyTerminalBlock> containers = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(containers, block => {
@@ -334,18 +381,19 @@ void DisplayInventory(Boolean connected = false) {
             List<MyInventoryItem> items = new List<MyInventoryItem>();
             inventory.GetItems(items);
             foreach (MyInventoryItem item in items) {
-                if (cargo.Keys.Contains(item.Type)) cargo[item.Type] += item.Amount;
-                else cargo[item.Type] = item.Amount;
+                if (type.Length == 0 || item.Type.TypeId.Equals($"MyObjectBuilder_{ type }")) {
+                    if (subtype.Length == 0 || item.Type.SubtypeId.Equals(subtype)) {
+                        if (cargo.Keys.Contains(item.Type)) cargo[item.Type] += item.Amount;
+                        else cargo[item.Type] = item.Amount;
+                    }
+                }
             }
         }
 
         return true;
     });
 
-    Display(cargoDisplays, "", false);
-    foreach (KeyValuePair<MyItemType, MyFixedPoint> entry in cargo.OrderBy(i => FormatItemType(i.Key))) {
-        Display(cargoDisplays, $"{ FormatItemType(entry.Key) }: { FormatItemAmount(entry.Value) }\n");
-    }
+    return cargo;
 }
 
 string FormatItemType(MyItemType type) {
