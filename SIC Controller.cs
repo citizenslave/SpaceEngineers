@@ -10,6 +10,10 @@ List<IMyCargoContainer> storageContainers = new List<IMyCargoContainer>();
 
 Dictionary<IMyRefinery,Dictionary<string,int>> RefineryPriorities = new Dictionary<IMyRefinery,Dictionary<string,int>>();
 Dictionary<IMyRefinery,List<IMyTextSurface>> RefineryDisplays = new Dictionary<IMyRefinery,List<IMyTextSurface>>();
+string[] ORES = { "Stone", "Iron", "Nickel", "Silicon", "Cobalt", "Magnesium", "Gold", "Silver", "Uranium", "Platinum", "Scrap" };
+
+Dictionary<string,int> MenuIndicies = new Dictionary<string,int>();
+Dictionary<string,int> MenuSizes = new Dictionary<string,int>();
 
 public Program() {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
@@ -22,6 +26,22 @@ public Program() {
     antenna = tAntenna[0];
     antenna.AttachedProgrammableBlock = Me.EntityId;
     IGC.RegisterBroadcastListener(RSN_CHANNEL).SetMessageCallback(RSN_CHANNEL);
+
+    MenuIndicies["SIC Refinery 1 - Priority Menu"] = 0;
+    MenuIndicies["SIC Refinery 2 - Priority Menu"] = 0;
+
+    if (Storage.Length != 0) {
+        MyIni SaveData = new MyIni();
+        MyIniParseResult result = new MyIniParseResult();
+        if (SaveData.TryParse(Storage, out result)) {
+            if (SaveData.ContainsSection("Menus")) {
+                List<MyIniKey> menuKeys = new List<MyIniKey>();
+                SaveData.GetKeys("Menus", menuKeys);
+                foreach (MyIniKey menuKey in menuKeys)
+                    MenuIndicies[menuKey.ToString().Split('/')[1]] = SaveData.Get(menuKey).ToInt32(0);
+            }
+        }
+    }
 }
 
 Boolean IsConnected(IMyTerminalBlock block) {
@@ -29,7 +49,9 @@ Boolean IsConnected(IMyTerminalBlock block) {
 }
 
 public void Save() {
-
+    MyIni SaveData = new MyIni();
+    foreach (KeyValuePair<string,int> menuIndex in MenuIndicies) SaveData.Set("Menus", menuIndex.Key, menuIndex.Value);
+    Storage = SaveData.ToString();
 }
 
 public void Main(string argument, UpdateType updateSource) {
@@ -47,6 +69,26 @@ public void Main(string argument, UpdateType updateSource) {
     if (updateSource != UpdateType.None) {
         if (argument.Equals(RSN_CHANNEL)) FetchPacket(RSN_CHANNEL);
         else if (argument.Split()[0].ToUpper().Contains("REFINERY")) ProcessRefineryCommands(argument);
+        else if (argument.Split()[0].ToUpper().Contains("MENU")) ProcessMenuCommands(argument);
+    }
+}
+
+void ProcessMenuCommands(string command) {
+    MyCommandLine menuCommand = new MyCommandLine();
+    if (menuCommand.TryParse(command)) {
+        if (menuCommand.Argument(0).ToUpper().Equals("MENU+") ||
+                menuCommand.Argument(0).ToUpper().Equals("MENU-")) {
+            string menuName = menuCommand.Argument(1);
+            if (MenuIndicies.Keys.Contains(menuName) &&
+                    MenuSizes.Keys.Contains(menuName)) {
+                Boolean isIncrease = menuCommand.Argument(0).Contains("+");
+                MenuIndicies[menuName] = MenuIndicies[menuName] + (isIncrease?1:-1);
+                if (MenuIndicies[menuName] > MenuSizes[menuName]-1)
+                    MenuIndicies[menuName] = 0;
+                else if (MenuIndicies[menuName] < 0)
+                    MenuIndicies[menuName] = MenuSizes[menuName]-1;
+            } else Echo($"Menu { menuName } is not configured properly.");
+        } else Echo($"Invalid menu command: { menuCommand.Argument(0) }");
     }
 }
 
@@ -54,19 +96,66 @@ void ProcessRefineryCommands(string command) {
     MyCommandLine refineryCommand = new MyCommandLine();
     if (refineryCommand.TryParse(command)) {
         IMyRefinery refinery = GridTerminalSystem.GetBlockWithName(refineryCommand.Argument(2)) as IMyRefinery;
-        if (refinery != null) {
+        if (refinery != null && RefineryPriorities.Keys.Contains(refinery)) {
             if (refineryCommand.Argument(1).ToUpper().Equals("CLEAR")) {
                 SortBlockInventory(refinery, refinery.GetInventory(0), storageContainers);
                 Echo($"{ refinery.CustomName } input inventory cleared...");
+            } else if (refineryCommand.Argument(1).ToUpper().Equals("PRIORITY+") ||
+                    refineryCommand.Argument(1).ToUpper().Equals("PRIORITY-")) {
+                AdjustRefineryPriority(refinery, refineryCommand);
             } else Echo($"Unknown Refinery Command:\n\"{ refineryCommand.Argument(1) }\"");
-        } else Echo($"Cannot find refinery with -name \"{ refineryCommand.Argument(2) }\"");
+        } else Echo($"Cannot find prioritized refinery \"{ refineryCommand.Argument(2) }\"");
     }
 }
+
+void AdjustRefineryPriority(IMyRefinery refinery, MyCommandLine refineryCommand) {
+    Boolean isIncrease = refineryCommand.Argument(1).Contains("+");
+    string ore = refineryCommand.Argument(3);
+    if (ore.ToUpper().Equals("MENU")) {
+        string menuName = $"{ refinery.CustomName } - Priority Menu";
+        ore = GetOreAtPriority(refinery, MenuIndicies[menuName]+1);
+        MenuIndicies[menuName] = MenuIndicies[menuName] + (isIncrease?-1:1);
+    }
+    Boolean isInvalidCommand = true;
+    if (!ORES.Contains(ore))
+        Echo($"Invalid ore type for { refineryCommand.Argument(1) }: { ore }");
+    else if (!RefineryPriorities[refinery].Keys.Contains(ore))
+        RefineryPriorities[refinery][ore] = RefineryPriorities[refinery].Count+1;
+    else if (isIncrease && RefineryPriorities[refinery][ore] == 1)
+        Echo($"{ ore } is set to maximum priority in:\n{ refinery.CustomName }");
+    else if (!isIncrease && RefineryPriorities[refinery][ore] == RefineryPriorities[refinery].Count)
+        Echo($"{ ore } is set to minimum priority in:\n{ refinery.CustomName }");
+    else isInvalidCommand = false;
+    if (!isInvalidCommand) {
+        int currentOrePriority = RefineryPriorities[refinery][ore];
+        int newOrePriority = currentOrePriority+(isIncrease?-1:1);
+        string oreAtNewPriority = GetOreAtPriority(refinery, newOrePriority);
+        RefineryPriorities[refinery][oreAtNewPriority] = currentOrePriority;
+        RefineryPriorities[refinery][ore] = newOrePriority;
+        Echo($"{ ore } priority { (isIncrease?"increased":"decreased") }");
+    }
+    MyIni refineryConfig = new MyIni();
+    foreach (KeyValuePair<string,int> orePriority in RefineryPriorities[refinery])
+        refineryConfig.Set("Priority", orePriority.Key, orePriority.Value);
+    Echo(refineryConfig.ToString());
+    refinery.CustomData = refineryConfig.ToString();
+}
+
+string GetOreAtPriority(IMyRefinery refinery, int priority) {
+    foreach (KeyValuePair<string,int> orePriority in RefineryPriorities[refinery]) {
+        if (orePriority.Value == priority) return orePriority.Key;
+    }
+    return "";
+}
+
 void PrioritizeRefining() {
     List<IMyRefinery> refineries = new List<IMyRefinery>();
     GridTerminalSystem.GetBlocksOfType(refineries, block => {
         if (!IsConnected(block)) return false;
+        if (!block.Enabled) return false;
         IMyRefinery refinery = (IMyRefinery) block;
+        string menuName = $"{ refinery.CustomName } - Priority Menu";
+        MenuSizes[menuName] = 0;
         MyIni refineryConfig = new MyIni();
         MyIniParseResult result = new MyIniParseResult();
         if (refineryConfig.TryParse(block.CustomData, out result)) {
@@ -78,15 +167,22 @@ void PrioritizeRefining() {
                     if (!panel.CustomData.Contains($"[LCD]\nRefineryDisplay=\"{ refinery.CustomName }\"")) return false;
                     surface.ContentType = ContentType.TEXT_AND_IMAGE;
                     surface.FontColor = Color.DarkSlateGray;
+                    surface.Alignment = TextAlignment.CENTER;
                     return true;
                 });
                 Display(RefineryDisplays[refinery], $"{ refinery.CustomName }\nPRIORITIES\n", false);
                 List<MyIniKey> priorityKeys = new List<MyIniKey>();
                 refineryConfig.GetKeys("Priority", priorityKeys);
+                int priorityIndex = 0;
                 foreach(MyIniKey priorityKey in priorityKeys.OrderBy(i => refineryConfig.Get(i).ToInt32(int.MaxValue))) {
+                    MenuSizes[menuName]++;
                     string oreKey = priorityKey.ToString().Split('/')[1];
                     RefineryPriorities[refinery][oreKey] = refineryConfig.Get("Priority", oreKey).ToInt32(int.MaxValue);
-                    Display(RefineryDisplays[refinery], $"{ oreKey }: { SortOre(oreKey, refinery) }\n");
+                    string displayItem = (priorityIndex==MenuIndicies[menuName]?">":"");
+                    displayItem += $"{ oreKey }: { SortOre(oreKey, refinery) }";
+                    displayItem += (priorityIndex==MenuIndicies[menuName]?"<":"");
+                    Display(RefineryDisplays[refinery], $"{ displayItem }\n");
+                    priorityIndex++;
                 }
             }
         }
@@ -113,7 +209,7 @@ string SortOre(string oreKey, IMyRefinery refinery) {
             itemSlot = FindItemSlot(inventory, oreToFind, itemSlot);
             if (itemSlot != -1) amount += ((MyInventoryItem) inventory.GetItemAt(itemSlot)).Amount;
         }
-        return !RefineryPriorities.Keys.Contains(block) && !IsConnected(block);
+        return !RefineryPriorities.Keys.Contains(block) && IsConnected(block);
     });
     foreach (IMyTerminalBlock block in blocks) {
         IMyInventory foundInventoryOnConstruct = block.GetInventory(0);
@@ -189,6 +285,8 @@ void SortInventory(Boolean connected = false) {
                 block.BlockDefinition.ToString().Contains("Connector")) {
             SortBlockInventory(block, block.GetInventory(0), storageContainers);
             return true;
+        } else if (!block.GetInventory(0).IsConnectedTo(storageContainers[0].GetInventory(0))) {
+            return false;
         }
 
         else Echo($"{ block.BlockDefinition.ToString() } block inventories not sorted.");
