@@ -6,3 +6,4 @@ A collection of Space Engineers scripts for the in-game programmable block.
 * [Ice Station Controller.cs](./Ice%20Station%20Controller.cs) is a controller script for a mining station to operate automated drills running on two sets of pistons to control their radial and vertical positions within a resource vein.  The script pauses the drills when the cargo capacity of the station is full beyond a certain percentage of the total available cargo space.
 * [SIC Controller.cs](./SIC%20Controller.cs) is a controller script for the Space Industrial Complex, including an inventory display, inventory management, refinery prioritization, and other features.
 * [RS1 Controller.cs](./RS1%20Controller.cs) is the controller script for the RelaySatNetwork satellites, controlling their inventory assessment and RSN broadcasting.
+* [Shuttle Controller.cs](./Shuttle%20Controller.cs) is the controller script for the Cargo Shuttle, where we will be implementing our autopilot script.
