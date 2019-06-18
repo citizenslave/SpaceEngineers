@@ -13,6 +13,7 @@ List<IMyTextSurface> autopilotDisplays = new List<IMyTextSurface>();
 List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
 List<IMyGyro> gyros = new List<IMyGyro>();
 Dictionary<Base6Directions.Direction,List<IMyThrust>> thrusters = new Dictionary<Base6Directions.Direction,List<IMyThrust>>();
+Dictionary<Base6Directions.Direction,float> acceleration = new Dictionary<Base6Directions.Direction,float>();
 Dictionary<string,MyWaypointInfo> waypoints = new Dictionary<string,MyWaypointInfo>();
 Boolean autopilotReady = false;
 
@@ -103,6 +104,28 @@ void UpdateAutopilot() {
     GridTerminalSystem.GetBlocksOfType(gyros, IsConnected);
     if (gyros.Count == 0) Echo("UpdateAutopilot() failed:\nNo gyros found.");
 
+    List<IMyThrust> tThrusters = new List<IMyThrust>();
+    float mass = autopilotController.CalculateShipMass().PhysicalMass;
+    acceleration = new Dictionary<Base6Directions.Direction,float>();
+    GridTerminalSystem.GetBlocksOfType(tThrusters, block => {
+        if (!IsConnected(block)) return false;
+        IMyThrust thruster = (IMyThrust) block;
+
+        Base6Directions.Direction orientation =
+            autopilotController.WorldMatrix.GetClosestDirection(thruster.WorldMatrix.Backward);
+
+        if (thrusters.Keys.Contains(orientation)) {
+            thrusters[orientation].Add(thruster);
+        } else {
+            thrusters[orientation] = new List<IMyThrust>();
+            thrusters[orientation].Add(thruster);
+        }
+        if (acceleration.Keys.Contains(orientation)) acceleration[orientation] += thruster.MaxEffectiveThrust/mass;
+        else acceleration[orientation] = thruster.MaxEffectiveThrust/mass;
+
+        return true;
+    });
+
     List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(blocks, block => {
         if (!IsConnected(block)) return false;
@@ -139,10 +162,13 @@ void ProcessArguments(string arguments) {
                     command.Argument(1).ToUpper().Equals("LOCK")) {
                 OrientShip(command);
                 validCommand = true;
+            } else if (command.Argument(1).ToUpper().Equals("FLYTO")) {
+                FlyTo(command);
+                validCommand = true;
             } else if (command.Argument(1).ToUpper().Equals("DISABLED") ||
                     command.Argument(1).ToUpper().Equals("COMPLETE")) {
                 Runtime.UpdateFrequency &= ~UpdateFrequency.Update1;
-                autopilotMission = command.Argument(1).ToUpper();
+                DisableAutopilot(command);
                 validCommand = true;
             }
             if (!validCommand) Echo($"Invalid autopilot mission:\n{ arguments.Substring("AUTOPILOT".Length) }");
@@ -150,16 +176,109 @@ void ProcessArguments(string arguments) {
     }
 }
 
-void OrientShip(MyCommandLine command) {
+void DisableAutopilot(MyCommandLine command) {
+    autopilotMission = command.Argument(1).ToUpper();
+    foreach (IMyGyro gyro in gyros) {
+        gyro.GyroOverride = false;
+        gyro.Yaw = 0f;
+        gyro.Pitch = 0f;
+        gyro.Roll = 0f;
+    }
+    foreach (KeyValuePair<Base6Directions.Direction,List<IMyThrust>> kvp in thrusters)
+        foreach (IMyThrust thruster in kvp.Value) thruster.ThrustOverride = 0f;
+}
+
+MyWaypointInfo GetWaypointTarget(MyCommandLine command) {
     string gps = "Missing GPS Target";
-    if (command.ArgumentCount == 3) gps = command.Argument(2);
+    if (command.ArgumentCount >= 3) gps = command.Argument(2);
     MyWaypointInfo target;
     if (waypoints.Keys.Contains(gps)) target = waypoints[gps];
     else if (MyWaypointInfo.TryParse(gps, out target)) waypoints[target.Name] = target;
-    else Echo($"Invalid GPS target:\n{ gps }");
+    else autopilotStatus = $"Invalid GPS target:\n{ gps }";
+
+    return target;
+}
+
+void FlyTo(MyCommandLine command) {
+    MyWaypointInfo target = GetWaypointTarget(command);
+    if (autopilotStatus.Contains("Invalid GPS target")) return;
+    double speed = 80f;
+    if (command.ArgumentCount >= 4) speed = float.Parse(command.Argument(3));
 
     Runtime.UpdateFrequency |= UpdateFrequency.Update1;
-    autopilotMission = $"{ command.Argument(1).ToUpper() } { target.Name }";
+    autopilotMission = $"{ command.Argument(1).ToUpper() } \"{ target.Name }\" { speed }";
+    double pitch, yaw;
+    GetDirectionTo(target.Coords, autopilotController, out pitch, out yaw);
+    autopilotStatus += $"Yaw: { yaw.ToString("n2") }\nPitch: { pitch.ToString("n2") }\n";
+
+    Vector3D currentVelocity = Vector3D.TransformNormal(autopilotController.GetShipVelocities().LinearVelocity,
+            Matrix.Transpose(autopilotController.WorldMatrix));
+    autopilotStatus += $"\nVelocity:\nX: { currentVelocity.X.ToString("n2") }\nY: {currentVelocity.Y.ToString("n2") }\n";
+    autopilotStatus += $"Z: { currentVelocity.Z.ToString("n2") }\n";
+
+    double distance = (target.Coords - autopilotController.GetPosition()).Length();
+    double stoppingDistance = (speed*speed)/(2*acceleration[Base6Directions.Direction.Backward]);
+    autopilotStatus += $"\nDistance:\n{ distance.ToString("n2") }m\n";
+    autopilotStatus += $"{ acceleration[Base6Directions.Direction.Backward].ToString("n2") }m/s2\n";
+    autopilotStatus += $"{ stoppingDistance.ToString("n2") }m";
+
+    pitch = MathHelper.Clamp(pitch, -ATTITUDE_MAX, ATTITUDE_MAX);
+    yaw = MathHelper.Clamp(yaw, -ATTITUDE_MAX, ATTITUDE_MAX);
+    foreach (IMyGyro gyro in gyros)
+        OverrideGyro(gyro, TransformVector(new Vector3D(pitch, yaw, 0), autopilotController, gyro), true);
+    if (gyros[0].GyroOverride) return;
+
+    if (currentVelocity.X < -0.1f) {
+        ApplyThrust(Base6Directions.Direction.Right, 0.1f);
+        ApplyThrust(Base6Directions.Direction.Left, 0f);
+    } else if (currentVelocity.X > 0.1f) {
+        ApplyThrust(Base6Directions.Direction.Right, 0f);
+        ApplyThrust(Base6Directions.Direction.Left, 0.1f);
+    } else {
+        ApplyThrust(Base6Directions.Direction.Right, 0f);
+        ApplyThrust(Base6Directions.Direction.Left, 0f);
+    }
+
+    if (currentVelocity.Y < -0.1f) {
+        ApplyThrust(Base6Directions.Direction.Down, 0f);
+        ApplyThrust(Base6Directions.Direction.Up, 0.1f);
+    } else if (currentVelocity.Y > 0.1f) {
+        ApplyThrust(Base6Directions.Direction.Down, 0.1f);
+        ApplyThrust(Base6Directions.Direction.Up, 0f);
+    } else {
+        ApplyThrust(Base6Directions.Direction.Up, 0f);
+        ApplyThrust(Base6Directions.Direction.Down, 0f);
+    }
+
+    if (currentVelocity.Z < -speed) {
+        ApplyThrust(Base6Directions.Direction.Backward, 0.1f);
+        ApplyThrust(Base6Directions.Direction.Forward, 0f);
+    } else if (currentVelocity.Z > -speed) {
+        ApplyThrust(Base6Directions.Direction.Backward, 0f);
+        ApplyThrust(Base6Directions.Direction.Forward, 0.1f);
+    } else {
+        ApplyThrust(Base6Directions.Direction.Forward, 0f);
+        ApplyThrust(Base6Directions.Direction.Backward, 0f);
+    }
+
+    if ((distance < stoppingDistance + 1000f)) {
+        if ((currentVelocity.Length() > 0.5f)) {
+            ApplyThrust(Base6Directions.Direction.Backward, 1f);
+            ApplyThrust(Base6Directions.Direction.Forward, 0f);
+        } else autopilotMission = "COMPLETE";
+    }
+}
+
+void ApplyThrust(Base6Directions.Direction direction, float percentage) {
+    foreach (IMyThrust thruster in thrusters[direction]) thruster.ThrustOverridePercentage = percentage;
+}
+
+void OrientShip(MyCommandLine command) {
+    MyWaypointInfo target = GetWaypointTarget(command);
+    if (autopilotStatus.Contains("Invalid GPS target")) return;
+
+    Runtime.UpdateFrequency |= UpdateFrequency.Update1;
+    autopilotMission = $"{ command.Argument(1).ToUpper() } \"{ target.Name }\"";
     double pitch, yaw;
     GetDirectionTo(target.Coords, autopilotController, out pitch, out yaw);
     autopilotStatus += $"Yaw: { yaw.ToString("n2") }\nPitch: { pitch.ToString("n2") }\n";
