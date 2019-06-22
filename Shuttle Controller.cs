@@ -1,21 +1,24 @@
-string SIC_GPS = "GPS:SIC:24379.54:165341.15:2651.77:";
-MyWaypointInfo sicGps = new MyWaypointInfo();
-
 const float ATTITUDE_RATE = 0.05f;
 const float ATTITUDE_TOLERANCE = 0.05f;
 const float ATTITUDE_MAX = 20f;
 
 string autopilotMission = "DISABLED";
 string autopilotStatus = "";
+Boolean autopilotReady = false;
 
 IMyRemoteControl autopilotController;
-List<IMyTextSurface> autopilotDisplays = new List<IMyTextSurface>();
-List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
+
+IMyCameraBlock forwardCamera;
 List<IMyGyro> gyros = new List<IMyGyro>();
-Dictionary<Base6Directions.Direction,List<IMyThrust>> thrusters = new Dictionary<Base6Directions.Direction,List<IMyThrust>>();
-Dictionary<Base6Directions.Direction,float> acceleration = new Dictionary<Base6Directions.Direction,float>();
+
+Dictionary<Base6Directions.Direction,List<IMyThrust>> thrusters =
+        new Dictionary<Base6Directions.Direction,List<IMyThrust>>();
+Dictionary<Base6Directions.Direction,float> acceleration =
+        new Dictionary<Base6Directions.Direction,float>();
+
 Dictionary<string,MyWaypointInfo> waypoints = new Dictionary<string,MyWaypointInfo>();
-Boolean autopilotReady = false;
+List<IMyTextSurface> autopilotDisplays = new List<IMyTextSurface>();
+MyDetectedEntityInfo collidingEntity;
 
 public Program() {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
@@ -26,24 +29,31 @@ public Program() {
     MyIni SaveData = new MyIni();
     MyIniParseResult result;
     if (SaveData.TryParse(Storage, out result)) {
-        if (SaveData.ContainsSection("Waypoints")) {
-            List<MyIniKey> waypointData = new List<MyIniKey>();
-            SaveData.GetKeys("Waypoints", waypointData);
-            foreach (MyIniKey wp in waypointData) {
-                MyWaypointInfo tWP;
-                MyWaypointInfo.TryParse(SaveData.Get(wp).ToString(), out tWP);
-                waypoints[wp.ToString().Split('/')[1]] = tWP;
-            }
-        }
-        if (SaveData.ContainsSection("Autopilot")) {
-            if (SaveData.ContainsKey("Autopilot", "AutopilotMission")) {
-                autopilotMission = SaveData.Get("Autopilot", "AutopilotMission").ToString("DISABLED");
-                UpdateAutopilot();
-                ProcessArguments($"AUTOPILOT { autopilotMission }");
-            }
+        LoadWaypoints(SaveData);
+        RestoreAutopilot(SaveData);
+    }
+}
+
+void RestoreAutopilot(MyIni SaveData) {
+    if (SaveData.ContainsSection("Autopilot")) {
+        if (SaveData.ContainsKey("Autopilot", "AutopilotMission")) {
+            autopilotMission = SaveData.Get("Autopilot", "AutopilotMission").ToString("DISABLED");
+            UpdateAutopilot();
+            ProcessArguments($"AUTOPILOT { autopilotMission }");
         }
     }
-    MyWaypointInfo.TryParse(SIC_GPS, out sicGps);
+}
+
+void LoadWaypoints(MyIni SaveData) {
+    if (SaveData.ContainsSection("Waypoints")) {
+        List<MyIniKey> waypointData = new List<MyIniKey>();
+        SaveData.GetKeys("Waypoints", waypointData);
+        foreach (MyIniKey wp in waypointData) {
+            MyWaypointInfo tWP;
+            MyWaypointInfo.TryParse(SaveData.Get(wp).ToString(), out tWP);
+            waypoints[wp.ToString().Split('/')[1]] = tWP;
+        }
+    }
 }
 
 Boolean AddPrefix(IMyTerminalBlock block) {
@@ -92,6 +102,19 @@ public void Main(string argument, UpdateType updateSource) {
 }
 
 void UpdateAutopilot() {
+    FindAutopilotController();
+    FindCameras();
+    FindGyros();
+    FindThrusters();
+    FindScreens();
+
+    autopilotReady = gyros.Count > 0 && (autopilotController is IMyRemoteControl);
+    if (!autopilotReady) autopilotMission = "NOT READY";
+    else if (autopilotMission.Equals("NOT READY")) autopilotMission = "READY...";
+    Display(autopilotDisplays, $"AUTOPILOT:\n{ autopilotMission }\n\n{ autopilotStatus }", false);
+}
+
+void FindAutopilotController() {
     List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
     GridTerminalSystem.GetBlocksOfType(remotes, block => {
         if (!IsConnected(block)) return false;
@@ -100,13 +123,42 @@ void UpdateAutopilot() {
     });
     if (remotes.Count == 1) autopilotController = remotes[0];
     else Echo($"UpdateAutopilot() failed:\n{ remotes.Count } configured remotes found.");
+}
 
+void FindCameras() {
+    List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
+    GridTerminalSystem.GetBlocksOfType(cameras, block => {
+        if (!IsConnected(block)) return false;
+        if (!block.Orientation.Forward.Equals(autopilotController.Orientation.Forward)) return false;
+        if (!block.CustomData.Contains("Autopilot Collision Detector")) return false;
+        
+        /*IMyCameraBlock camera = block as IMyCameraBlock;
+        camera.EnableRaycast = true;
+        Echo($"{ camera.AvailableScanRange.ToString() } / { camera.RaycastDistanceLimit.ToString() }");
+        Echo($"{ camera.RaycastConeLimit.ToString() }");
+        if (camera.CanScan(110000f)) {
+            lastDetectedEntity = camera.Raycast(110000f, 0, 0);
+        }
+        if (!lastDetectedEntity.Equals(null) && !lastDetectedEntity.IsEmpty()) {
+            Echo($"{ lastDetectedEntity.Type.ToString() }: { lastDetectedEntity.Name }");
+            Echo($"{ lastDetectedEntity.HitPosition }\n{ lastDetectedEntity.Position }");
+            Echo($"{ lastDetectedEntity.BoundingBox.ToString() }");
+        }*/
+        return true;
+    });
+    if (cameras.Count == 1) forwardCamera = cameras[0];
+    else Echo($"{ cameras.Count } collision detecting cameras found.");
+}
+
+void FindGyros() {
     GridTerminalSystem.GetBlocksOfType(gyros, IsConnected);
     if (gyros.Count == 0) Echo("UpdateAutopilot() failed:\nNo gyros found.");
+}
 
-    List<IMyThrust> tThrusters = new List<IMyThrust>();
+void FindThrusters() {
     float mass = autopilotController.CalculateShipMass().PhysicalMass;
     acceleration = new Dictionary<Base6Directions.Direction,float>();
+    List<IMyThrust> tThrusters = new List<IMyThrust>();
     GridTerminalSystem.GetBlocksOfType(tThrusters, block => {
         if (!IsConnected(block)) return false;
         IMyThrust thruster = (IMyThrust) block;
@@ -125,7 +177,9 @@ void UpdateAutopilot() {
 
         return true;
     });
+}
 
+void FindScreens() {
     List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(blocks, block => {
         if (!IsConnected(block)) return false;
@@ -144,11 +198,6 @@ void UpdateAutopilot() {
             return true;
         } else return false;
     });
-
-    autopilotReady = gyros.Count > 0 && (autopilotController is IMyRemoteControl);
-    if (!autopilotReady) autopilotMission = "NOT READY";
-    else if (autopilotMission.Equals("NOT READY")) autopilotMission = "READY...";
-    Display(autopilotDisplays, $"AUTOPILOT:\n{ autopilotMission }\n\n{ autopilotStatus }", false);
 }
 
 void ProcessArguments(string arguments) {
@@ -186,6 +235,7 @@ void DisableAutopilot(MyCommandLine command) {
     }
     foreach (KeyValuePair<Base6Directions.Direction,List<IMyThrust>> kvp in thrusters)
         foreach (IMyThrust thruster in kvp.Value) thruster.ThrustOverride = 0f;
+    if (forwardCamera != null) forwardCamera.EnableRaycast = false;
 }
 
 MyWaypointInfo GetWaypointTarget(MyCommandLine command) {
@@ -207,20 +257,23 @@ void FlyTo(MyCommandLine command) {
 
     Runtime.UpdateFrequency |= UpdateFrequency.Update1;
     autopilotMission = $"{ command.Argument(1).ToUpper() } \"{ target.Name }\" { speed }";
+
     double pitch, yaw;
     GetDirectionTo(target.Coords, autopilotController, out pitch, out yaw);
-    autopilotStatus += $"Yaw: { yaw.ToString("n2") }\nPitch: { pitch.ToString("n2") }\n";
+    autopilotStatus += $"Yaw: { yaw.ToString("n2") }\nPitch: { pitch.ToString("n2") }\n\n";
 
     Vector3D currentVelocity = Vector3D.TransformNormal(autopilotController.GetShipVelocities().LinearVelocity,
             Matrix.Transpose(autopilotController.WorldMatrix));
-    autopilotStatus += $"\nVelocity:\nX: { currentVelocity.X.ToString("n2") }\nY: {currentVelocity.Y.ToString("n2") }\n";
+    autopilotStatus += $"Velocity:\n";
+    autopilotStatus += $"X: { currentVelocity.X.ToString("n2") }\n";
+    autopilotStatus += $"Y: {currentVelocity.Y.ToString("n2") }\n";
     autopilotStatus += $"Z: { currentVelocity.Z.ToString("n2") }\n";
 
     double distance = (target.Coords - autopilotController.GetPosition()).Length();
     double stoppingDistance = (speed*speed)/(2*acceleration[Base6Directions.Direction.Backward]);
     autopilotStatus += $"\nDistance:\n{ distance.ToString("n2") }m\n";
     autopilotStatus += $"{ acceleration[Base6Directions.Direction.Backward].ToString("n2") }m/s2\n";
-    autopilotStatus += $"{ stoppingDistance.ToString("n2") }m";
+    autopilotStatus += $"{ stoppingDistance.ToString("n2") }m\n";
 
     pitch = MathHelper.Clamp(pitch, -ATTITUDE_MAX, ATTITUDE_MAX);
     yaw = MathHelper.Clamp(yaw, -ATTITUDE_MAX, ATTITUDE_MAX);
@@ -261,16 +314,32 @@ void FlyTo(MyCommandLine command) {
         ApplyThrust(Base6Directions.Direction.Backward, 0f);
     }
 
-    if ((distance < stoppingDistance + 1000f)) {
+    if (distance < stoppingDistance + 500f) {
         if ((currentVelocity.Length() > 0.5f)) {
             ApplyThrust(Base6Directions.Direction.Backward, 1f);
             ApplyThrust(Base6Directions.Direction.Forward, 0f);
         } else autopilotMission = "COMPLETE";
     }
+    if (IsCollisionCourse(stoppingDistance)) {
+        if (currentVelocity.Length() > 0.5f) {
+            ApplyThrust(Base6Directions.Direction.Backward, 1f);
+            ApplyThrust(Base6Directions.Direction.Forward, 0f);
+        } else autopilotMission = "DISABLED";
+    }
 }
 
 void ApplyThrust(Base6Directions.Direction direction, float percentage) {
     foreach (IMyThrust thruster in thrusters[direction]) thruster.ThrustOverridePercentage = percentage;
+}
+
+Boolean IsCollisionCourse(double stoppingDistance) {
+    double THRESHOLD = 1000;
+    forwardCamera.EnableRaycast = true;
+    if (forwardCamera.CanScan(stoppingDistance+THRESHOLD))
+        collidingEntity = forwardCamera.Raycast(stoppingDistance+THRESHOLD, 0, 0);
+    if (collidingEntity.Equals(null) || collidingEntity.IsEmpty()) return false;
+    autopilotStatus += $"COLLISION DETECTED: { collidingEntity.Type }";
+    return true;
 }
 
 void OrientShip(MyCommandLine command) {
