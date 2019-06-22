@@ -1,4 +1,6 @@
 List<IMyTextSurface> cargoDisplays = new List<IMyTextSurface>();
+float cargoDisplayIndex = 0f;
+int MAX_CARGO_DISPLAY = 18;
 
 List<IMyTextSurface> rsnDisplays = new List<IMyTextSurface>();
 IMyRadioAntenna antenna;
@@ -103,6 +105,7 @@ void ProcessRefineryCommands(string command) {
             } else if (refineryCommand.Argument(1).ToUpper().Equals("PRIORITY+") ||
                     refineryCommand.Argument(1).ToUpper().Equals("PRIORITY-")) {
                 AdjustRefineryPriority(refinery, refineryCommand);
+                SortBlockInventory(refinery, refinery.GetInventory(0), storageContainers);
             } else if (refineryCommand.Argument(1).ToUpper().Equals("SCAN")) {
                 Dictionary<MyItemType,MyFixedPoint>.KeyCollection ores = ScanCargo(true, "Ore").Keys;
                 foreach (MyItemType type in ores)
@@ -196,33 +199,40 @@ void PrioritizeRefining() {
         MyIni refineryConfig = new MyIni();
         MyIniParseResult result = new MyIniParseResult();
         if (refineryConfig.TryParse(block.CustomData, out result)) {
-            if (true || refineryConfig.ContainsSection("Priority")) {
-                RefineryPriorities[refinery] = new Dictionary<string,int>();
-                RefineryDisplays[refinery] = new List<IMyTextSurface>();
-                GridTerminalSystem.GetBlocksOfType(RefineryDisplays[refinery], surface => {
-                    IMyTextPanel panel = (IMyTextPanel) surface;
-                    if (!panel.CustomData.Contains($"[LCD]\nRefineryDisplay=\"{ refinery.CustomName }\"")) return false;
-                    surface.ContentType = ContentType.TEXT_AND_IMAGE;
-                    surface.FontColor = Color.DarkSlateGray;
-                    surface.Alignment = TextAlignment.CENTER;
-                    return true;
-                });
-                Display(RefineryDisplays[refinery], $"{ refinery.CustomName }\nPRIORITIES\n", false);
-                List<MyIniKey> priorityKeys = new List<MyIniKey>();
-                refineryConfig.GetKeys("Priority", priorityKeys);
-                int priorityIndex = 0;
-                foreach(MyIniKey priorityKey in priorityKeys.OrderBy(i => refineryConfig.Get(i).ToInt32(int.MaxValue))) {
-                    MenuSizes[menuName]++;
-                    string oreKey = priorityKey.ToString().Split('/')[1];
-                    RefineryPriorities[refinery][oreKey] = refineryConfig.Get("Priority", oreKey).ToInt32(int.MaxValue);
-                    string displayItem = (priorityIndex==MenuIndicies[menuName]?">":"");
-                    displayItem += $"{ oreKey }: { SortOre(oreKey, refinery) }";
-                    displayItem += (priorityIndex==MenuIndicies[menuName]?"<":"");
-                    Display(RefineryDisplays[refinery], $"{ displayItem }\n");
-                    priorityIndex++;
+            RefineryPriorities[refinery] = new Dictionary<string,int>();
+            RefineryDisplays[refinery] = new List<IMyTextSurface>();
+            GridTerminalSystem.GetBlocksOfType(RefineryDisplays[refinery], surface => {
+            IMyTextPanel panel = (IMyTextPanel) surface;
+            if (!panel.CustomData.Contains($"[LCD]\nRefineryDisplay=\"{ refinery.CustomName }\"")) return false;
+                surface.ContentType = ContentType.TEXT_AND_IMAGE;
+                surface.FontColor = Color.DarkSlateGray;
+                surface.Alignment = TextAlignment.CENTER;
+                return true;
+            });
+            Display(RefineryDisplays[refinery], $"{ refinery.CustomName }\nPRIORITIES\n", false);
+            List<MyIniKey> priorityKeys = new List<MyIniKey>();
+            refineryConfig.GetKeys("Priority", priorityKeys);
+            int priorityIndex = 0;
+            IMyInventory refineryInventory = refinery.GetInventory(0);
+            int refineryInventoryIndex = 0;
+            foreach(MyIniKey priorityKey in priorityKeys.OrderBy(i => refineryConfig.Get(i).ToInt32(int.MaxValue))) {
+                MenuSizes[menuName]++;
+                string oreKey = priorityKey.ToString().Split('/')[1];
+                if (refineryInventory.IsItemAt(refineryInventoryIndex)) {
+                    MyInventoryItem priorityItem = (MyInventoryItem) refineryInventory.GetItemAt(refineryInventoryIndex);
+                    MyItemType prioritizedOre = new MyItemType("MyObjectBuilder_Ore", oreKey);
+                    if (priorityItem.Type.Equals(prioritizedOre)) refineryInventoryIndex++;
+                    else if (!refineryInventory.FindItem(prioritizedOre).Equals(null))
+                        SortBlockInventory(refinery, refinery.GetInventory(0), storageContainers);
                 }
-                if (MenuSizes[menuName] == 0) Display(RefineryDisplays[refinery], "---SCAN FOR ORE---");
+                RefineryPriorities[refinery][oreKey] = refineryConfig.Get("Priority", oreKey).ToInt32(int.MaxValue);
+                string displayItem = (priorityIndex==MenuIndicies[menuName]?">":"");
+                displayItem += $"{ oreKey }: { SortOre(oreKey, refinery) }";
+                displayItem += (priorityIndex==MenuIndicies[menuName]?"<":"");
+                Display(RefineryDisplays[refinery], $"{ displayItem }\n");
+                priorityIndex++;
             }
+            if (MenuSizes[menuName] == 0) Display(RefineryDisplays[refinery], "---SCAN FOR ORE---");
         }
         return true;
     });
@@ -311,13 +321,17 @@ void SortInventory(Boolean connected = false) {
         if (block.BlockDefinition.ToString().Contains("Reactor")) return false;
         if (block.BlockDefinition.ToString().Contains("OxygenGenerator")) return false;
         if (block.BlockDefinition.ToString().Contains("OxygenTank")) return false;
+        if (block.BlockDefinition.ToString().Contains("Turret")) return false;
 
         if (block.BlockDefinition.ToString().Contains("Refinery")) {
             SortBlockInventory(block, block.GetInventory(1), storageContainers);
             return true;
         } else if (block.BlockDefinition.ToString().Contains("Assembler")) {
-            if ((block as IMyAssembler).IsQueueEmpty) SortBlockInventory(block, block.GetInventory(0), storageContainers);
-            SortBlockInventory(block, block.GetInventory(1), storageContainers);
+            IMyAssembler assembler = block as IMyAssembler;
+            if (assembler.IsQueueEmpty || assembler.Mode == MyAssemblerMode.Disassembly)
+                SortBlockInventory(block, block.GetInventory(0), storageContainers);
+            if (assembler.IsQueueEmpty || assembler.Mode == MyAssemblerMode.Assembly)
+                SortBlockInventory(block, block.GetInventory(1), storageContainers);
             return true;
         } else if (block.BlockDefinition.ToString().Contains("Container") ||
                 block.BlockDefinition.ToString().Contains("Connector")) {
@@ -364,8 +378,13 @@ void DisplayInventory(Boolean connected = false) {
     Dictionary<MyItemType, MyFixedPoint> cargo = ScanCargo(connected);
 
     Display(cargoDisplays, "", false);
+    int cargoIndex = 0;
     foreach (KeyValuePair<MyItemType, MyFixedPoint> entry in cargo.OrderBy(i => FormatItemType(i.Key))) {
-        Display(cargoDisplays, $"{ FormatItemType(entry.Key) }: { FormatItemAmount(entry.Value) }\n");
+        if ((cargo.Count > MAX_CARGO_DISPLAY && cargoIndex++ >= Math.Floor(cargoDisplayIndex)) ||
+                cargo.Count < MAX_CARGO_DISPLAY)
+            Display(cargoDisplays, $"{ FormatItemType(entry.Key) }: { FormatItemAmount(entry.Value) }\n");
+        cargoDisplayIndex += 0.25f;
+        if (cargoDisplayIndex >= cargo.Count-(MAX_CARGO_DISPLAY-1)) cargoDisplayIndex = 0f;
     }
 }
 
