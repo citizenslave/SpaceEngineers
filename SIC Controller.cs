@@ -8,6 +8,7 @@ string RSN_CHANNEL = "RSN";
 Dictionary<long,string> rsnStatusData = new Dictionary<long,string>();
 Dictionary<long,int> rsnAgeData = new Dictionary<long,int>();
 
+Boolean IsDisassembling = false;
 List<IMyCargoContainer> storageContainers = new List<IMyCargoContainer>();
 
 Dictionary<IMyRefinery,Dictionary<string,int>> RefineryPriorities = new Dictionary<IMyRefinery,Dictionary<string,int>>();
@@ -42,6 +43,8 @@ public Program() {
                 foreach (MyIniKey menuKey in menuKeys)
                     MenuIndicies[menuKey.ToString().Split('/')[1]] = SaveData.Get(menuKey).ToInt32(0);
             }
+            if (SaveData.ContainsSection("Disassembling"))
+                IsDisassembling = SaveData.Get("Disassembling","Status").ToBoolean(false);
         }
     }
 }
@@ -53,6 +56,7 @@ Boolean IsConnected(IMyTerminalBlock block) {
 public void Save() {
     MyIni SaveData = new MyIni();
     foreach (KeyValuePair<string,int> menuIndex in MenuIndicies) SaveData.Set("Menus", menuIndex.Key, menuIndex.Value);
+    SaveData.Set("Disassembling", "Status", IsDisassembling);
     Storage = SaveData.ToString();
 }
 
@@ -72,6 +76,41 @@ public void Main(string argument, UpdateType updateSource) {
         if (argument.Equals(RSN_CHANNEL)) FetchPacket(RSN_CHANNEL);
         else if (argument.Split()[0].ToUpper().Contains("REFINERY")) ProcessRefineryCommands(argument);
         else if (argument.Split()[0].ToUpper().Contains("MENU")) ProcessMenuCommands(argument);
+        else if (argument.ToUpper().Equals("COLLECT")) SortInventory(true);
+        else if (argument.ToUpper().Equals("DISASSEMBLE")) DisassembleComponents();
+        else if (argument.ToUpper().Contains("PUSH")) PushComponents(argument);
+    }
+}
+
+void PushComponents(string command) {
+    MyCommandLine pushCommand = new MyCommandLine();
+    if (pushCommand.TryParse(command)) {
+        if (pushCommand.ArgumentCount > 1) {
+            string targetGrid = pushCommand.Argument(1);
+            List<IMyCargoContainer> targetContainers = new List<IMyCargoContainer>();
+            GridTerminalSystem.GetBlocksOfType(targetContainers, block => {
+                if (!block.CubeGrid.CustomName.Equals(targetGrid)) return false;
+                return true;
+            });
+            List<IMyCargoContainer> componentContainers = new List<IMyCargoContainer>();
+            GridTerminalSystem.GetBlocksOfType(componentContainers, block => {
+                if (!IsConnected(block)) return false;
+                if (!block.CustomData.Contains("componentStoragePriority")) return false;
+                return true;
+            });
+            foreach (IMyCargoContainer container in componentContainers) {
+                IMyInventory containerInventory = container.GetInventory(0);
+                List<MyInventoryItem> items = new List<MyInventoryItem>();
+                containerInventory.GetItems(items);
+                foreach (MyInventoryItem item in items) {
+                    foreach (IMyCargoContainer target in targetContainers) {
+                        IMyInventory targetInventory = target.GetInventory(0);
+                        targetInventory.TransferItemFrom(containerInventory, item);
+                        if (!targetInventory.IsFull) break;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -92,6 +131,45 @@ void ProcessMenuCommands(string command) {
             } else Echo($"Menu { menuName } is not configured properly.");
         } else Echo($"Invalid menu command: { menuCommand.Argument(0) }");
     }
+}
+
+void DisassembleComponents() {
+    List<IMyAssembler> assemblers = new List<IMyAssembler>();
+    List<IMyCargoContainer> containers = new List<IMyCargoContainer>();
+    List<MyDefinitionId> blueprints = new List<MyDefinitionId>();
+
+    GridTerminalSystem.GetBlocksOfType(assemblers, block => {
+        if (!IsConnected(block)) return false;
+        IMyAssembler assembler = block as IMyAssembler;
+        if (!assembler.CooperativeMode) return false;
+        assembler.Mode = MyAssemblerMode.Disassembly;
+        return true;
+    });
+    GridTerminalSystem.GetBlocksOfType(containers, block => {
+        if (!IsConnected(block)) return false;
+        if (!block.CustomData.Contains("componentStoragePriority")) return false;
+        return true;
+    });
+   
+    //Code used to retrieve and set CustomData on the primary Assembler to all of the blueprint names.
+    // Queue up one of each component before running.
+    //List<MyProductionItem> prodItems = new List<MyProductionItem>();
+    //assemblers[0].GetQueue(prodItems);
+    //assemblers[0].CustomData = "";
+    //foreach (MyProductionItem prodItem in prodItems) assemblers[0].CustomData += $"{prodItem.BlueprintId.ToString()}\n";
+
+    foreach (string blueprintString in assemblers[0].CustomData.Split('\n'))
+        if (blueprintString.Length > 0) blueprints.Add(MyDefinitionId.Parse(blueprintString));
+    foreach (IMyCargoContainer container in containers) {
+        IMyInventory inventory = container.GetInventory(0);
+        List<MyInventoryItem> items = new List<MyInventoryItem>();
+        inventory.GetItems(items);
+        foreach (MyInventoryItem item in items) {
+            MyDefinitionId blueprint = blueprints.Find(x => x.ToString().Contains(item.Type.SubtypeId));
+            assemblers[0].AddQueueItem(blueprint, item.Amount);
+        }
+    }
+    IsDisassembling = true;
 }
 
 void ProcessRefineryCommands(string command) {
@@ -311,17 +389,24 @@ void UpdateRSNDisplays() {
 
 void SortInventory(Boolean connected = false) {
     storageContainers.Clear();
-    GridTerminalSystem.GetBlocksOfType(storageContainers, IsConnected);
+    GridTerminalSystem.GetBlocksOfType(storageContainers, block => {
+        if (!IsConnected(block) || !block.CustomData.Contains("StoragePriority")) return false;
+        else return true;
+    });
 
     List<IMyTerminalBlock> containers = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(containers, block => {
         if (!IsConnected(block) && !connected) return false;
         if (!block.HasInventory) return false;
+        if (!block.GetInventory(0).IsConnectedTo(storageContainers[0].GetInventory(0))) return false;
 
         if (block.BlockDefinition.ToString().Contains("Reactor")) return false;
         if (block.BlockDefinition.ToString().Contains("OxygenGenerator")) return false;
         if (block.BlockDefinition.ToString().Contains("OxygenTank")) return false;
         if (block.BlockDefinition.ToString().Contains("Turret")) return false;
+        if (block.BlockDefinition.ToString().Contains("Gun")) return false;
+        if (block.BlockDefinition.ToString().Contains("Missile")) return false;
+        if (block.BlockDefinition.ToString().Contains("Survival")) return false;
 
         if (block.BlockDefinition.ToString().Contains("Refinery")) {
             SortBlockInventory(block, block.GetInventory(1), storageContainers);
@@ -332,18 +417,21 @@ void SortInventory(Boolean connected = false) {
                 SortBlockInventory(block, block.GetInventory(0), storageContainers);
             if (assembler.IsQueueEmpty || assembler.Mode == MyAssemblerMode.Assembly)
                 SortBlockInventory(block, block.GetInventory(1), storageContainers);
+            if (IsDisassembling && assembler.IsQueueEmpty && assembler.Mode == MyAssemblerMode.Disassembly) {
+                IsDisassembling = false;
+                assembler.Mode = MyAssemblerMode.Assembly;
+            }
             return true;
         } else if (block.BlockDefinition.ToString().Contains("Container") ||
-                block.BlockDefinition.ToString().Contains("Connector")) {
+                block.BlockDefinition.ToString().Contains("Connector") ||
+                block.BlockDefinition.ToString().Contains("Cockpit") ||
+                block.BlockDefinition.ToString().Contains("Drill") ||
+                block.BlockDefinition.ToString().Contains("Welder")) {
             SortBlockInventory(block, block.GetInventory(0), storageContainers);
             return true;
-        } else if (!block.GetInventory(0).IsConnectedTo(storageContainers[0].GetInventory(0))) {
-            return false;
-        }
+        } else Echo($"{ block.BlockDefinition.ToString() } block inventories not sorted.");
 
-        else Echo($"{ block.BlockDefinition.ToString() } block inventories not sorted.");
-
-        return true;
+        return false;
     });
 }
 
@@ -352,15 +440,14 @@ void SortBlockInventory(IMyTerminalBlock block, IMyInventory inventory,
     List<MyInventoryItem> items = new List<MyInventoryItem>();
     inventory.GetItems(items);
     foreach (MyInventoryItem item in items) {
-        Boolean transferred = false;
         Boolean overflow = false;
         foreach (IMyCargoContainer container in storageContainers.OrderBy(i => GetPriority(i.CustomData, item.Type))) {
             IMyInventory destinationInventory = container.GetInventory(0);
-            transferred = inventory.TransferItemTo(destinationInventory, item);
-            overflow = GetPriority(container.CustomData, item.Type) > storageContainers.Count;
-            if (transferred || inventory.Equals(destinationInventory)) break;
+            inventory.TransferItemTo(destinationInventory, item);
+            overflow = GetPriority(container.CustomData, item.Type) > storageContainers.Count && destinationInventory.IsFull;
+            if (!destinationInventory.IsFull || inventory.Equals(destinationInventory)) break;
         }
-        if ((overflow || !transferred) && !storageContainers.Contains(block))
+        if ((overflow) && !storageContainers.Contains(block))
             Echo($"Insufficient Storage for { FormatItemType(item.Type) } ({ item.Amount }) - { block.CustomName }");
     }
 }
@@ -383,9 +470,9 @@ void DisplayInventory(Boolean connected = false) {
         if ((cargo.Count > MAX_CARGO_DISPLAY && cargoIndex++ >= Math.Floor(cargoDisplayIndex)) ||
                 cargo.Count < MAX_CARGO_DISPLAY)
             Display(cargoDisplays, $"{ FormatItemType(entry.Key) }: { FormatItemAmount(entry.Value) }\n");
-        cargoDisplayIndex += 0.25f;
-        if (cargoDisplayIndex >= cargo.Count-(MAX_CARGO_DISPLAY-1)) cargoDisplayIndex = 0f;
     }
+    cargoDisplayIndex += 0.5f;
+    if (cargoDisplayIndex >= cargo.Count-(MAX_CARGO_DISPLAY-1)) cargoDisplayIndex = 0f;
 }
 
 Dictionary<MyItemType,MyFixedPoint> ScanCargo(Boolean connected = false, string type = "", string subtype = "") {
